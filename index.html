@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport"
+        content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>AIと一緒にデザインを考える</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: #111820;
+    }
+
+    body {
+      display: grid;
+      grid-template-rows: 1fr auto;
+    }
+
+    main {
+      position: relative;
+      display: grid;
+      place-items: center;
+      min-height: 0;
+      padding: 12px;
+    }
+
+    canvas {
+      display: block;
+      max-width: 100%;
+      max-height: 100%;
+      background: white;
+      box-shadow: 0 8px 40px rgb(0 0 0 / 45%);
+    }
+
+    .loading,
+    .error {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      text-align: center;
+      background: #111820;
+    }
+
+    .error { color: #ffb4ab; }
+    [hidden] { display: none !important; }
+
+    footer {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      min-height: 58px;
+      padding: 8px max(12px, env(safe-area-inset-right))
+        max(8px, env(safe-area-inset-bottom))
+        max(12px, env(safe-area-inset-left));
+      background: #17222e;
+      box-shadow: 0 -2px 12px rgb(0 0 0 / 25%);
+    }
+
+    button,
+    input {
+      min-height: 40px;
+      border: 1px solid #526678;
+      border-radius: 8px;
+      color: #f5f7fa;
+      background: #263747;
+      font: inherit;
+    }
+
+    button {
+      min-width: 44px;
+      padding: 7px 12px;
+      cursor: pointer;
+    }
+
+    button:hover { background: #334b60; }
+    button:disabled { opacity: 0.4; cursor: default; }
+
+    input {
+      width: 54px;
+      padding: 6px;
+      text-align: center;
+    }
+
+    .counter {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      white-space: nowrap;
+    }
+
+    @media (max-width: 520px) {
+      main { padding: 4px; }
+      footer { gap: 6px; }
+      button { padding-inline: 9px; }
+      .button-label { display: none; }
+    }
+
+    :fullscreen body { grid-template-rows: 1fr auto; }
+  </style>
+</head>
+<body>
+  <main id="stage">
+    <canvas id="slide" aria-label="PDFスライド"></canvas>
+    <div id="loading" class="loading">
+      スライドを読み込んでいます…
+    </div>
+    <div id="error" class="error" hidden></div>
+  </main>
+
+  <footer>
+    <button id="prev" type="button" aria-label="前のスライド">
+      ◀ <span class="button-label">前へ</span>
+    </button>
+    <div class="counter">
+      <input id="pageNumber" type="number" min="1" value="1"
+             aria-label="ページ番号">
+      <span>/ <span id="pageCount">--</span></span>
+    </div>
+    <button id="next" type="button" aria-label="次のスライド">
+      <span class="button-label">次へ</span> ▶
+    </button>
+    <button id="fullscreen" type="button" aria-label="全画面表示">
+      ⛶ <span class="button-label">全画面</span>
+    </button>
+  </footer>
+
+  <script type="module">
+    import * as pdfjsLib from "./pdf.min.mjs";
+
+    pdfjsLib.GlobalWorkerOptions.workerSrc = "./pdf.worker.min.mjs";
+
+    const pdfUrl = "./ai-design-study.pdf";
+    const canvas = document.querySelector("#slide");
+    const context = canvas.getContext("2d", { alpha: false });
+    const stage = document.querySelector("#stage");
+    const loading = document.querySelector("#loading");
+    const errorBox = document.querySelector("#error");
+    const prevButton = document.querySelector("#prev");
+    const nextButton = document.querySelector("#next");
+    const pageInput = document.querySelector("#pageNumber");
+    const pageCount = document.querySelector("#pageCount");
+    const fullscreenButton = document.querySelector("#fullscreen");
+
+    let pdf = null;
+    let currentPage = 1;
+    let renderTask = null;
+    let resizeTimer = null;
+    let touchStartX = 0;
+
+    function updateControls() {
+      pageInput.value = currentPage;
+      prevButton.disabled = currentPage <= 1;
+      nextButton.disabled = currentPage >= pdf.numPages;
+      location.hash = `page=${currentPage}`;
+    }
+
+    async function renderPage(pageNumber) {
+      if (!pdf) return;
+      if (renderTask) renderTask.cancel();
+
+      const page = await pdf.getPage(pageNumber);
+      const baseViewport = page.getViewport({ scale: 1 });
+      const bounds = stage.getBoundingClientRect();
+      const cssScale = Math.min(
+        bounds.width / baseViewport.width,
+        bounds.height / baseViewport.height
+      );
+      const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+      const viewport = page.getViewport({
+        scale: cssScale * pixelRatio
+      });
+
+      canvas.width = Math.floor(viewport.width);
+      canvas.height = Math.floor(viewport.height);
+      canvas.style.width = `${viewport.width / pixelRatio}px`;
+      canvas.style.height = `${viewport.height / pixelRatio}px`;
+
+      renderTask = page.render({ canvasContext: context, viewport });
+      try {
+        await renderTask.promise;
+      } catch (error) {
+        if (error?.name !== "RenderingCancelledException") throw error;
+      } finally {
+        renderTask = null;
+      }
+    }
+
+    async function goTo(pageNumber) {
+      const nextPage = Math.max(1, Math.min(pdf.numPages, pageNumber));
+      currentPage = nextPage;
+      updateControls();
+      await renderPage(currentPage);
+    }
+
+    function pageFromHash() {
+      const match = location.hash.match(/page=(\d+)/);
+      return match ? Number(match[1]) : 1;
+    }
+
+    prevButton.addEventListener("click", () => goTo(currentPage - 1));
+    nextButton.addEventListener("click", () => goTo(currentPage + 1));
+
+    pageInput.addEventListener("change", () => {
+      goTo(Number(pageInput.value) || 1);
+    });
+
+    fullscreenButton.addEventListener("click", async () => {
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+      } else {
+        await document.documentElement.requestFullscreen();
+      }
+    });
+
+    document.addEventListener("keydown", (event) => {
+      if (["ArrowRight", "PageDown", " "].includes(event.key)) {
+        event.preventDefault();
+        goTo(currentPage + 1);
+      }
+      if (["ArrowLeft", "PageUp"].includes(event.key)) {
+        event.preventDefault();
+        goTo(currentPage - 1);
+      }
+      if (event.key === "Home") goTo(1);
+      if (event.key === "End") goTo(pdf.numPages);
+    });
+
+    stage.addEventListener("touchstart", (event) => {
+      touchStartX = event.changedTouches[0].clientX;
+    }, { passive: true });
+
+    stage.addEventListener("touchend", (event) => {
+      const distance = event.changedTouches[0].clientX - touchStartX;
+      if (Math.abs(distance) < 50) return;
+      goTo(currentPage + (distance < 0 ? 1 : -1));
+    }, { passive: true });
+
+    window.addEventListener("resize", () => {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => renderPage(currentPage), 120);
+    });
+
+    try {
+      pdf = await pdfjsLib.getDocument(pdfUrl).promise;
+      pageCount.textContent = pdf.numPages;
+      pageInput.max = pdf.numPages;
+      loading.hidden = true;
+      await goTo(pageFromHash());
+    } catch (error) {
+      loading.hidden = true;
+      errorBox.hidden = false;
+      errorBox.textContent = [
+        "PDFを読み込めませんでした。",
+        "ファイル構成をご確認ください。"
+      ].join("");
+      console.error(error);
+    }
+  </script>
+</body>
+</html>
